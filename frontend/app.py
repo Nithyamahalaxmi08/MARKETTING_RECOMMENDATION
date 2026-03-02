@@ -12,8 +12,7 @@ st.markdown("""
 <style>
     .main .block-container { max-width: 1200px; margin: auto; }
     .why-box {
-        background: #fff8e1;
-        border-left: 4px solid #FFA000;
+               border-left: 4px solid #FFA000;
         border-radius: 6px;
         padding: 10px 16px;
         margin-top: 6px;
@@ -438,17 +437,6 @@ if st.session_state.df_sorted is not None:
 
             st.markdown(" ")
 
-            # ── Word cloud ────────────────────────────────────────
-            if "reviews_text" in df.columns:
-                all_text = " ".join(df["reviews_text"].dropna())
-                if all_text.strip():
-                    st.subheader("☁️ What Customers Are Saying")
-                    wc = WordCloud(width=800, height=320, background_color="white",
-                                   colormap="RdYlGn").generate(all_text)
-                    fig_wc, ax_wc = plt.subplots(figsize=(10, 3.5))
-                    ax_wc.imshow(wc, interpolation="bilinear")
-                    ax_wc.axis("off")
-                    st.pyplot(fig_wc)
 
         # ══════════════════════════════════════════════════════════
         # TAB 2 — TOP 10 PRODUCTS
@@ -748,10 +736,4 @@ if st.session_state.df_sorted is not None:
                         "Rework":         "background-color:#ffebee",
                     }.get(v, "")
 
-                st.dataframe(
-                    df[sum_cols].style.applymap(
-                        _color,
-                        subset=["marketing_status"] if "marketing_status" in sum_cols else [],
-                    ),
-                    use_container_width=True,
-                )
+                st.dataframe(df[sum_cols], use_container_width=True)
