@@ -1,284 +1,248 @@
+"""
+main.py  —  FastAPI backend
+============================
+- No asyncio policy changes needed (scraper.py handles isolation)
+- SSE keepalive pings every 15s to prevent Streamlit read timeout
+- Sentiment + hybrid recommendation applied per product
+"""
+
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from scraper import crawl_stream
 import json
-from nltk.sentiment import SentimentIntensityAnalyzer
+import asyncio
+import re
 import nltk
+from nltk.sentiment import SentimentIntensityAnalyzer
 from datetime import datetime
+
+nltk.download("vader_lexicon", quiet=True)
+sia = SentimentIntensityAnalyzer()
 
 app = FastAPI()
 
-# ✅ Download once at startup
-nltk.download("vader_lexicon")
-sia = SentimentIntensityAnalyzer()
 
+# ──────────────────────────────────────────────
+# SENTIMENT
+# ──────────────────────────────────────────────
 
-# ----------------------------------
-# SENTIMENT FUNCTION
-# ----------------------------------
-
-def apply_sentiment(product):
+def apply_sentiment(product: dict) -> dict:
     """
-    Uses NLTK VADER to calculate sentiment for each review and the
-    overall average sentiment for the product.
+    Sentiment fallback chain
+    ─────────────────────────────────────────────────────────
+    Level 1 — Customer reviews (most reliable)
+        Use all review texts → average VADER compound score.
+        sentiment_source = "reviews"
 
-    Formula (printed in the terminal for transparency):
-        avg_sentiment = sum(compound_scores) / number_of_reviews
+    Level 2 — Product description (if no reviews)
+        Run VADER on the description text.
+        Useful for well-written product pages (books, skincare etc.)
+        sentiment_source = "description"
+
+    Level 3 — Product name only (if no description either)
+        Run VADER on the product name.
+        Very rough signal — words like "Premium", "Damaged",
+        "Luxury", "Anti-dandruff" carry weak but real polarity.
+        sentiment_source = "name"
+
+    Level 4 — No text at all
+        Set avg_sentiment = 0.0 (neutral).
+        sentiment_source = "none"
+    ─────────────────────────────────────────────────────────
+    The field `sentiment_source` is stored so the frontend
+    can show the user where the score came from.
     """
+    reviews     = product.get("reviews") or []
+    description = (product.get("description") or "").strip()
+    name        = (product.get("product_name") or "").strip()
 
-    reviews = product.get("reviews", []) or []
-
+    # ── Level 1: reviews ──────────────────────────────────
     if reviews:
+        scores = [sia.polarity_scores(r)["compound"] for r in reviews]
+        n      = len(scores)
+        avg    = round(sum(scores) / n, 3) if n else 0.0
+        product["avg_sentiment"]    = avg
+        product["sentiment_scores"] = scores
+        product["sentiment_source"] = "reviews"
+        print(f"  Sentiment [{name[:40]}] = {avg} (from {n} reviews)")
+        return product
 
-        sentiment_scores = []
+    # ── Level 2: description ──────────────────────────────
+    if description and len(description) > 20:
+        # Split into sentences for a more stable average
+        sentences = [s.strip() for s in re.split(r"[.!?]", description) if len(s.strip()) > 8]
+        if sentences:
+            scores = [sia.polarity_scores(s)["compound"] for s in sentences]
+            avg    = round(sum(scores) / len(scores), 3)
+        else:
+            avg = round(sia.polarity_scores(description)["compound"], 3)
 
-        print("\n" + "=" * 80)
-        print(f"[{datetime.now()}] 🔍 Sentiment analysis for product: {product.get('product_name')}")
-        print("-" * 80)
-
-        for idx, review in enumerate(reviews, start=1):
-            score_dict = sia.polarity_scores(review)
-            compound = score_dict["compound"]
-            sentiment_scores.append(compound)
-
-            # ✅ Show extracted review + raw VADER output in the terminal
-            print(f"Review {idx}: {review}")
-            print(f"VADER scores: {score_dict}")
-            print("-" * 40)
-
-        total = sum(sentiment_scores)
-        n = len(sentiment_scores)
-        avg = total / n if n else 0.0
-
-        # ✅ Average sentiment (VADER compound mean)
-        product["avg_sentiment"] = round(avg, 3)
-
-        # Optional: store individual sentiment scores
-        product["sentiment_scores"] = sentiment_scores
-
-        # ✅ Explicitly print the formula being applied
-        print(
-            f"avg_sentiment = sum(compound_scores) / number_of_reviews "
-            f"= {total:.4f} / {n} = {avg:.4f}"
-        )
-        print("=" * 80 + "\n")
-
-    else:
-        product["avg_sentiment"] = 0.0
+        product["avg_sentiment"]    = avg
         product["sentiment_scores"] = []
+        product["sentiment_source"] = "description"
+        print(f"  Sentiment [{name[:40]}] = {avg} (estimated from description)")
+        return product
 
+    # ── Level 3: product name ─────────────────────────────
+    if name:
+        avg = round(sia.polarity_scores(name)["compound"], 3)
+        product["avg_sentiment"]    = avg
+        product["sentiment_scores"] = []
+        product["sentiment_source"] = "name"
+        print(f"  Sentiment [{name[:40]}] = {avg} (estimated from product name)")
+        return product
+
+    # ── Level 4: no text at all ───────────────────────────
+    product["avg_sentiment"]    = 0.0
+    product["sentiment_scores"] = []
+    product["sentiment_source"] = "none"
+    print(f"  Sentiment [{name[:40]}] = 0.0 (no text available)")
     return product
 
 
-# ----------------------------------
+# ──────────────────────────────────────────────
 # HYBRID RECOMMENDATION ENGINE
-# ----------------------------------
+# ──────────────────────────────────────────────
 
-def _infer_category(product: dict) -> str:
-    """
-    Try to infer a simple category from product data using keywords in
-    the name/description. This is a lightweight content feature.
-    """
-    text = " ".join(
-        [
-            str(product.get("product_name") or ""),
-            str(product.get("description") or ""),
-        ]
-    ).lower()
-
-    if any(k in text for k in ["laptop", "phone", "mobile", "camera", "electronics"]):
+def infer_category(product: dict) -> str:
+    text = " ".join([
+        str(product.get("product_name") or ""),
+        str(product.get("description")  or ""),
+    ]).lower()
+    if any(k in text for k in ["laptop", "phone", "mobile", "tablet", "camera", "electronics", "headphone", "speaker"]):
         return "electronics"
-    if any(k in text for k in ["shirt", "tshirt", "t-shirt", "jeans", "dress", "fashion"]):
+    if any(k in text for k in ["shirt", "tshirt", "t-shirt", "jeans", "dress", "jacket", "fashion", "clothing", "shoes", "kurta", "saree"]):
         return "fashion"
-    if any(k in text for k in ["sofa", "chair", "table", "furniture", "home"]):
+    if any(k in text for k in ["sofa", "chair", "table", "furniture", "home", "decor", "curtain", "pillow"]):
         return "home"
-
+    if any(k in text for k in ["book", "novel", "fiction", "author", "publisher"]):
+        return "books"
+    if any(k in text for k in ["serum", "moisturizer", "cleanser", "sunscreen", "skincare", "cream", "lotion", "face wash", "toner"]):
+        return "skincare"
     return "generic"
 
 
-def _get_discount(product: dict) -> float:
-    """
-    Placeholder discount feature.
-    If you later parse discount in the scraper, wire it here.
-    Currently assumes 0 when not present.
-    """
-    try:
-        return float(product.get("discount", 0.0))
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def hybrid_marketing_recommendation(product: dict) -> dict:
-    """
-    Hybrid Recommendation = Content-based scoring + Knowledge-based rules.
+    rating       = float(product.get("rating")        or 0.0)
+    review_count = float(product.get("review_count")  or 0.0)
+    sentiment    = float(product.get("avg_sentiment") or 0.0)
+    category     = infer_category(product)
+    discount     = float(product.get("discount", 0.0) or 0.0)
 
-    Content-based part:
-        Uses features: rating, review_count, avg_sentiment.
-        For each platform we compute a score:
+    norm_rating    = min(rating / 5.0, 1.0)
+    norm_reviews   = min(review_count / 1000.0, 1.0)
+    norm_sentiment = (sentiment + 1.0) / 2.0
 
-        base_score = (
-            w_rating   * normalized_rating +
-            w_reviews  * normalized_review_count +
-            w_sent     * normalized_sentiment
-        )
+    base = 0.4 * norm_rating + 0.2 * norm_reviews + 0.4 * norm_sentiment
 
-    Knowledge-based part:
-        Applies business rules and boosts platform scores. Examples:
-        - If sentiment > 0.7 and discount < 10%  -> boost Influencer / Instagram
-        - If electronics and festival season      -> boost Google Ads
-        - If high sentiment but low review_count  -> boost WhatsApp / Email
-    """
-
-    rating = float(product.get("rating") or 0.0)
-    review_count = float(product.get("review_count") or 0.0)
-    sentiment = float(product.get("avg_sentiment") or 0.0)
-
-    category = _infer_category(product)
-    discount = _get_discount(product)
-
-    # ------------- CONTENT-BASED SCORING -------------
-    # Normalize features to [0, 1] ranges for scoring
-    norm_rating = rating / 5.0  # assuming 5-star system
-    # "Soft" normalization – more than 1000 reviews treated as max
-    norm_reviews = min(review_count / 1000.0, 1.0)
-    # VADER compound already in [-1, 1]; shift to [0, 1]
-    norm_sentiment = (sentiment + 1) / 2
-
-    # Feature weights for content-based recommendation
-    w_rating = 0.4
-    w_reviews = 0.2
-    w_sent = 0.4
-
-    base_score = (
-        w_rating * norm_rating
-        + w_reviews * norm_reviews
-        + w_sent * norm_sentiment
-    )
-
-    # Core digital channels considered in this hybrid model.
-    # These are domain-driven choices, not scraped from the site.
-    platform_scores = {
-        # Social & visual
-        "Instagram": base_score,
-        "Facebook Ads": base_score * 0.95,
-        "YouTube Ads": base_score * 0.9,
-        "Influencer Marketing": base_score,
-        # Performance / search
-        "Google Ads": base_score,
-        # Owned / retention
-        "Email": base_score * 0.9,
-        "WhatsApp": base_score * 0.9,
-        "SMS": base_score * 0.85,
-        # Marketplace / other
-        "Marketplace Ads": base_score * 0.9,
+    scores = {
+        "Instagram":            base,
+        "Facebook Ads":         base * 0.95,
+        "YouTube Ads":          base * 0.90,
+        "Influencer Marketing": base,
+        "Google Ads":           base,
+        "Email":                base * 0.90,
+        "WhatsApp":             base * 0.90,
+        "SMS":                  base * 0.85,
+        "Marketplace Ads":      base * 0.90,
     }
 
-    rules_triggered = []
+    rules = []
 
-    # ------------- KNOWLEDGE-BASED RULES -------------
-
-    # Rule 1: If sentiment > 0.7 and discount < 10%, suggest influencer marketing
     if sentiment > 0.7 and discount < 10:
-        boost = 0.15
-        platform_scores["Influencer Marketing"] += boost
-        platform_scores["Instagram"] += boost
-        rules_triggered.append(
-            "Rule 1: High sentiment and low discount → boost Influencer & Instagram"
-        )
+        scores["Influencer Marketing"] += 0.15
+        scores["Instagram"]            += 0.15
+        rules.append("High sentiment + low discount → boost Influencer & Instagram")
 
-    # Rule 2: If electronics + (roughly) festival season, suggest Google Ads
-    # (Simple season check: Oct–Dec treated as festival-heavy by default)
-    month = datetime.now().month
-    if category == "electronics" and month in [9, 10, 11, 12]:
-        boost = 0.2
-        platform_scores["Google Ads"] += boost
-        rules_triggered.append(
-            "Rule 2: Electronics during festival season → boost Google Ads discount campaigns"
-        )
+    if category == "electronics" and datetime.now().month in [9, 10, 11, 12]:
+        scores["Google Ads"] += 0.20
+        rules.append("Electronics in festival season → boost Google Ads")
 
-    # Rule 3: High sentiment but low review volume → focus on conversational channels
     if sentiment > 0.6 and review_count < 20:
-        boost = 0.1
-        platform_scores["WhatsApp"] += boost
-        platform_scores["Email"] += boost
-        rules_triggered.append(
-            "Rule 3: High sentiment but low review_count → boost WhatsApp & Email for nurturing"
-        )
+        scores["WhatsApp"] += 0.10
+        scores["Email"]    += 0.10
+        rules.append("High sentiment + low review count → boost WhatsApp & Email")
 
-    # Rule 4: Generic / low sentiment products → rely more on performance channels
     if sentiment < 0.2:
-        boost = 0.1
-        platform_scores["Google Ads"] += boost
-        rules_triggered.append(
-            "Rule 4: Low sentiment → rely more on performance channels (Google Ads)"
-        )
+        scores["Google Ads"] += 0.10
+        rules.append("Low sentiment → boost Google Ads performance campaigns")
 
-    # Pick best and second-best platforms after hybrid scoring
-    sorted_platforms = sorted(
-        platform_scores.items(), key=lambda x: x[1], reverse=True
-    )
-    primary_platform = sorted_platforms[0][0] if sorted_platforms else None
-    secondary_platform = sorted_platforms[1][0] if len(sorted_platforms) > 1 else None
+    if category == "books":
+        scores["Email"]     += 0.10
+        scores["Instagram"] += 0.05
+        rules.append("Books category → boost Email & Instagram")
 
-    # Log recommendation in terminal for transparency
-    print(f"📈 Hybrid recommendation for: {product.get('product_name')}")
-    print(f"  Category inferred : {category}")
-    print(f"  Rating            : {rating}")
-    print(f"  Reviews           : {review_count}")
-    print(f"  Avg sentiment     : {sentiment}")
-    print(f"  Discount          : {discount}")
-    print(f"  Platform scores   : {platform_scores}")
-    print(f"  Primary platform  : {primary_platform}")
-    if secondary_platform:
-        print(f"  Secondary         : {secondary_platform}")
-    if rules_triggered:
-        print("  Rules triggered   :")
-        for r in rules_triggered:
-            print(f"    - {r}")
-    print("\n")
+    if category == "skincare":
+        scores["Instagram"]            += 0.12
+        scores["Influencer Marketing"] += 0.12
+        rules.append("Skincare category → boost Instagram & Influencer Marketing")
+
+    ranked    = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    primary   = ranked[0][0] if ranked else None
+    secondary = ranked[1][0] if len(ranked) > 1 else None
 
     return {
-        "primary_platform": primary_platform,
-        "secondary_platform": secondary_platform,
-        "platform_scores": platform_scores,
-        "rules_triggered": rules_triggered,
-        "category": category,
-        "discount": discount,
+        "primary_platform":   primary,
+        "secondary_platform": secondary,
+        "platform_scores":    scores,
+        "rules_triggered":    rules,
+        "category":           category,
+        "discount":           discount,
     }
 
 
-# ----------------------------------
-# STREAM ENDPOINT (FIXED)
-# ----------------------------------
+# ──────────────────────────────────────────────
+# STREAM ENDPOINT
+# ──────────────────────────────────────────────
 
 @app.get("/stream-crawl")
-def stream_crawl(url: str):
+async def stream_crawl(url: str):
 
-    def event_generator():
-        try:
-            for product in crawl_stream(url):
+    async def event_generator():
+        # Background task: crawl and push products into an asyncio queue
+        aio_queue: asyncio.Queue = asyncio.Queue()
 
-                if not product:
-                    continue
+        async def producer():
+            try:
+                async for product in crawl_stream(url):
+                    await aio_queue.put(product)
+            except Exception as e:
+                await aio_queue.put({"error": str(e)})
+            finally:
+                await aio_queue.put(None)  # end signal
 
-                # ✅ Apply sentiment (with terminal logging)
+        producer_task = asyncio.create_task(producer())
+
+        KEEPALIVE_INTERVAL = 15   # seconds — prevents Streamlit read timeout
+
+        while True:
+            try:
+                # Wait for next product, but send keepalive if nothing arrives
+                product = await asyncio.wait_for(aio_queue.get(), timeout=KEEPALIVE_INTERVAL)
+            except asyncio.TimeoutError:
+                # Send SSE comment as keepalive (Streamlit ignores it, connection stays alive)
+                yield ": keepalive\n\n"
+                continue
+
+            if product is None:
+                break   # crawl finished
+
+            if not product:
+                continue
+
+            if "error" not in product:
                 product = apply_sentiment(product)
+                product["marketing_recommendation"] = hybrid_marketing_recommendation(product)
 
-                # ✅ Hybrid marketing recommendation (content-based + rule-based)
-                rec = hybrid_marketing_recommendation(product)
-                product["marketing_recommendation"] = rec
+            yield f"data: {json.dumps(product)}\n\n"
 
-                # ✅ Convert dict to JSON string
-                json_data = json.dumps(product)
-
-                # ✅ Proper SSE format
-                yield f"data: {json_data}\n\n"
-
-        except Exception as e:
-            error_json = json.dumps({"error": str(e)})
-            yield f"data: {error_json}\n\n"
+        await producer_task
 
     return StreamingResponse(
         event_generator(),
-        media_type="text/event-stream"
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disables nginx buffering if behind a proxy
+        }
     )
