@@ -15,11 +15,64 @@ import re
 import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
 from datetime import datetime
+import csv
+import os
+from predict_platform import predict_platform
+
+CSV_FILE = "marketing_dataset.csv"
+
+def initialize_csv():
+    if not os.path.exists(CSV_FILE):
+        with open(CSV_FILE, "w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+
+            writer.writerow([
+                "product_name",
+                "price",
+                "rating",
+                "review_count",
+                "avg_sentiment",
+                "category",
+                "discount",
+                "brand",
+                "primary_platform",
+                "secondary_platform"
+            ])
+
+def clean_brand(brand: str) -> str:
+    if not brand:
+        return "Unknown"
+
+    brand = brand.lower()
+
+    if "deyga" in brand:
+        return "Deyga"
+
+    return brand.title()
 
 nltk.download("vader_lexicon", quiet=True)
 sia = SentimentIntensityAnalyzer()
 
 app = FastAPI()
+initialize_csv()
+
+def save_to_csv(product, recommendation):
+
+    with open(CSV_FILE, "a", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+
+        writer.writerow([
+            product["product_name"],
+            product["price"],
+            product["rating"],
+            product["review_count"],
+            product["avg_sentiment"],
+            recommendation["category"],
+            recommendation["discount"],
+            clean_brand(product.get("brand")),
+            recommendation["primary_platform"],
+            recommendation["secondary_platform"]
+        ])
 
 
 # ──────────────────────────────────────────────
@@ -107,18 +160,45 @@ def apply_sentiment(product: dict) -> dict:
 def infer_category(product: dict) -> str:
     text = " ".join([
         str(product.get("product_name") or ""),
-        str(product.get("description")  or ""),
+        str(product.get("description") or "")
     ]).lower()
-    if any(k in text for k in ["laptop", "phone", "mobile", "tablet", "camera", "electronics", "headphone", "speaker"]):
+
+    if any(k in text for k in [
+        "laptop","phone","mobile","tablet","camera","electronics",
+        "headphone","speaker","charger","usb","keyboard","mouse"
+    ]):
         return "electronics"
-    if any(k in text for k in ["shirt", "tshirt", "t-shirt", "jeans", "dress", "jacket", "fashion", "clothing", "shoes", "kurta", "saree"]):
+
+    if any(k in text for k in [
+        "shirt","tshirt","t-shirt","jeans","dress","jacket",
+        "fashion","clothing","shoes","kurta","saree","pant"
+    ]):
         return "fashion"
-    if any(k in text for k in ["sofa", "chair", "table", "furniture", "home", "decor", "curtain", "pillow"]):
+
+    if any(k in text for k in [
+        "sofa","chair","table","furniture","decor","curtain",
+        "pillow","bed","mattress","lamp"
+    ]):
         return "home"
-    if any(k in text for k in ["book", "novel", "fiction", "author", "publisher"]):
+
+    if any(k in text for k in [
+        "book","novel","fiction","author","publisher"
+    ]):
         return "books"
-    if any(k in text for k in ["serum", "moisturizer", "cleanser", "sunscreen", "skincare", "cream", "lotion", "face wash", "toner"]):
+
+    if any(k in text for k in [
+        "serum","moisturizer","cleanser","sunscreen","skincare",
+        "cream","lotion","face wash","toner","lip balm","lip scrub",
+        "face pack","mask","powder"
+    ]):
         return "skincare"
+
+    if any(k in text for k in [
+        "shampoo","conditioner","hair","dandruff","scalp",
+        "hairfall","beard oil","hair oil","hair serum"
+    ]):
+        return "haircare"
+
     return "generic"
 
 
@@ -136,15 +216,15 @@ def hybrid_marketing_recommendation(product: dict) -> dict:
     base = 0.4 * norm_rating + 0.2 * norm_reviews + 0.4 * norm_sentiment
 
     scores = {
-        "Instagram":            base,
-        "Facebook Ads":         base * 0.95,
-        "YouTube Ads":          base * 0.90,
-        "Influencer Marketing": base,
-        "Google Ads":           base,
-        "Email":                base * 0.90,
-        "WhatsApp":             base * 0.90,
-        "SMS":                  base * 0.85,
-        "Marketplace Ads":      base * 0.90,
+        "Instagram": base * 1.05,
+        "Facebook Ads": base,
+        "YouTube Ads": base * 0.95,
+        "Influencer Marketing": base * 1.05,
+        "Google Ads": base * 1.05,
+        "Email": base * 0.95,
+        "WhatsApp": base * 0.95,
+        "SMS": base * 0.90,
+        "Marketplace Ads": base,
     }
 
     rules = []
@@ -176,6 +256,29 @@ def hybrid_marketing_recommendation(product: dict) -> dict:
         scores["Instagram"]            += 0.12
         scores["Influencer Marketing"] += 0.12
         rules.append("Skincare category → boost Instagram & Influencer Marketing")
+    
+    # High price products perform well in search ads
+    price = float(product.get("price") or 0)
+
+    if price > 800:
+        scores["Google Ads"] += 0.15
+        rules.append("High price product → boost Google Ads")
+
+    # Very popular products
+    if review_count > 500:
+        scores["Marketplace Ads"] += 0.15
+        rules.append("High review count → boost Marketplace Ads")
+
+    # Niche / premium items
+    if rating > 4.8 and review_count < 50:
+        scores["Email"] += 0.12
+        scores["WhatsApp"] += 0.12
+        rules.append("High rating niche product → boost Email & WhatsApp")
+
+    # Video-friendly products
+    if category in ["electronics","fashion"]:
+        scores["YouTube Ads"] += 0.10
+        rules.append("Visual category → boost YouTube Ads")
 
     ranked    = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     primary   = ranked[0][0] if ranked else None
@@ -232,7 +335,12 @@ async def stream_crawl(url: str):
 
             if "error" not in product:
                 product = apply_sentiment(product)
-                product["marketing_recommendation"] = hybrid_marketing_recommendation(product)
+
+                recommendation = hybrid_marketing_recommendation(product)
+                product["marketing_recommendation"] = recommendation
+
+                if product.get("product_name") and "404" not in product["product_name"]:
+                    save_to_csv(product, recommendation)
 
             yield f"data: {json.dumps(product)}\n\n"
 
@@ -246,3 +354,6 @@ async def stream_crawl(url: str):
             "X-Accel-Buffering": "no",   # disables nginx buffering if behind a proxy
         }
     )
+
+if __name__ == "__main__":
+    initialize_csv()

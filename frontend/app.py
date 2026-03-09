@@ -131,8 +131,9 @@ if st.button("Crawl Website", type="primary"):
         if "marketing_recommendation" in df_sorted.columns:
             def _get(rec, key):
                 return rec.get(key) if isinstance(rec, dict) else None
-            for key in ["primary_platform","secondary_platform","platform_scores",
-                        "rules_triggered","category"]:
+            # Add platform_confidence to this list!
+            keys_to_unpack = ["primary_platform", "platform_confidence", "secondary_platform", "category", "rules_triggered"]
+            for key in keys_to_unpack:
                 df_sorted[key] = df_sorted["marketing_recommendation"].apply(lambda r: _get(r, key))
 
         # ── also pull sentiment_source from top-level if present ──
@@ -486,7 +487,7 @@ if st.session_state.df_sorted is not None:
             st.subheader("🛒 All Products")
             disp = [c for c in ["Rank","product_name","price","currency","rating",
                                   "review_count","avg_sentiment","brand",
-                                  "marketing_status","primary_platform"]
+                                  "marketing_status","primary_platform","platform_confidence"]
                     if c in df.columns]
             st.dataframe(df[disp], use_container_width=True)
 

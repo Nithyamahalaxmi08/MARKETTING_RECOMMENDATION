@@ -85,6 +85,28 @@ def safe_int(x) -> int:
         return int(re.sub(r"[^\d]", "", str(x)))
     except Exception:
         return 0
+    
+
+def is_block_page(soup) -> bool:
+    """
+    Detect Cloudflare / bot verification pages.
+    """
+    if not soup:
+        return False
+
+    text = soup.get_text(" ", strip=True).lower()
+
+    blocked_signals = [
+        "verify you are human",
+        "checking your browser",
+        "connection needs to be verified",
+        "enable javascript",
+        "cloudflare",
+        "cdn-cgi",
+        "please wait while we check your browser"
+    ]
+
+    return any(signal in text for signal in blocked_signals)
 
 # ─────────────────────────────────────────────
 # LINK CLASSIFICATION  (FIX 1: added /catalogue/)
@@ -625,12 +647,31 @@ async def _async_crawl(start_url: str, max_products: int, result_queue: queue.Qu
                 return
             seen_products.add(url)
             soup = await smart_fetch(url, ctx, scroll=False)
+
             if soup:
-                product = parse_product(soup, url)
-                if product:
-                    result_queue.put(product)
-                    count += 1
-                    logger.info(f"✅ [{count}/{max_products}] {product['product_name']}")
+
+                # 🚨 Skip Cloudflare / verification pages
+                if is_block_page(soup):
+                    logger.warning(f"Blocked by bot protection: {url}")
+                    return
+
+            product = parse_product(soup, url)
+
+            if product:
+
+                name = product.get("product_name","").lower()
+
+                if any(x in name for x in [
+                    "verify",
+                    "connection needs to be verified",
+                    "checking your browser",
+                    "cloudflare"
+                ]):
+                    return
+
+                result_queue.put(product)
+                count += 1
+                logger.info(f"✅ [{count}/{max_products}] {product['product_name']}")
 
         async def process_links_parallel(links: set):
             pending = [u for u in links if u not in seen_products]
