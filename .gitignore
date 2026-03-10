@@ -9,7 +9,6 @@ venv/
 
 # Pickle / dataset / model files (optional)
 *.pkl
-*.csv
 
 # VSCode / IDE files
 .vscode/
