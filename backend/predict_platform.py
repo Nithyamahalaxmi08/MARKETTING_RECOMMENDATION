@@ -29,12 +29,18 @@ def predict_platform(product):
     # 4. Combine (Numeric + Encoded)
     final_features = np.hstack([[numeric_data], cat_encoded])
 
-    # 5. Predict
-    prediction_idx = model.predict(final_features)[0]
-    platform = label_encoder.inverse_transform([prediction_idx])[0]
-
-    # 6. Confidence
     proba = model.predict_proba(final_features)[0]
-    confidence_score = proba[prediction_idx]
 
-    return platform, float(confidence_score)
+    # sort probabilities (highest first)
+    sorted_idx = np.argsort(proba)[::-1]
+
+    primary_idx = sorted_idx[0]
+    secondary_idx = sorted_idx[1]
+
+    primary_platform = label_encoder.inverse_transform([primary_idx])[0]
+    secondary_platform = label_encoder.inverse_transform([secondary_idx])[0]
+
+    primary_conf = float(proba[primary_idx])
+    secondary_conf = float(proba[secondary_idx])
+
+    return primary_platform, secondary_platform, primary_conf, secondary_conf

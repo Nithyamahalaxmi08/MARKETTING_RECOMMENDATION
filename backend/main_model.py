@@ -84,14 +84,16 @@ async def stream_crawl(url: str):
                 product = apply_sentiment(product)
                 
                 try:
-                    platform_name, confidence = predict_platform(product)
+                    primary, secondary, primary_conf, secondary_conf = predict_platform(product)
                     
                     # Wrap this in the key Streamlit expects
                     product["marketing_recommendation"] = {
-                        "primary_platform": platform_name,
-                        "platform_confidence": confidence,
+                        "primary_platform": primary,
+                        "secondary_platform": secondary,
+                        "primary_confidence": primary_conf,
+                        "secondary_confidence": secondary_conf,
                         "category": product.get("category", "General"),
-                        "rules_triggered": [] # Add any rules if you have them
+                        "rules_triggered": []
                     }
                     
                     # Also add sentiment_source so your UI explains it correctly

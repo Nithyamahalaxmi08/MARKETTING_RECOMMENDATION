@@ -132,9 +132,21 @@ if st.button("Crawl Website", type="primary"):
             def _get(rec, key):
                 return rec.get(key) if isinstance(rec, dict) else None
             # Add platform_confidence to this list!
-            keys_to_unpack = ["primary_platform", "platform_confidence", "secondary_platform", "category", "rules_triggered"]
+            keys_to_unpack = [
+                "primary_platform",
+                "primary_confidence",
+                "secondary_platform",
+                "secondary_confidence",
+                "category",
+                "rules_triggered"
+            ]
+
             for key in keys_to_unpack:
                 df_sorted[key] = df_sorted["marketing_recommendation"].apply(lambda r: _get(r, key))
+
+            df_sorted["primary_confidence"] = (df_sorted["primary_confidence"] * 100).round(2)
+            df_sorted["secondary_confidence"] = (df_sorted["secondary_confidence"] * 100).round(2)
+
 
         # ── also pull sentiment_source from top-level if present ──
         if "sentiment_source" not in df_sorted.columns:
@@ -416,9 +428,16 @@ if st.session_state.df_sorted is not None:
                 alt.Chart(opp)
                 .mark_circle(size=90, opacity=0.85)
                 .encode(
-                    x=alt.X("review_count:Q", title="Number of Reviews"),
-                    y=alt.Y("avg_sentiment:Q", title="Customer Sentiment",
-                            scale=alt.Scale(zero=False)),
+                    x=alt.X(
+                        "review_count:Q",
+                        title="Number of Reviews",
+                        scale=alt.Scale(type="log")
+                    ),
+                    y=alt.Y(
+                        "avg_sentiment:Q",
+                        title="Customer Sentiment",
+                        scale=alt.Scale(domain=[y_min - y_pad, y_max + y_pad])
+                    ),
                     color=alt.Color(
                         "quadrant:N",
                         scale=alt.Scale(
@@ -485,10 +504,14 @@ if st.session_state.df_sorted is not None:
         # ══════════════════════════════════════════════════════════
         with all_tab:
             st.subheader("🛒 All Products")
-            disp = [c for c in ["Rank","product_name","price","currency","rating",
-                                  "review_count","avg_sentiment","brand",
-                                  "marketing_status","primary_platform","platform_confidence"]
-                    if c in df.columns]
+            disp = [c for c in [
+            "Rank","product_name","price","currency",
+            "rating","review_count","avg_sentiment",
+            "brand","marketing_status",
+            "primary_platform","primary_confidence",
+            "secondary_platform","secondary_confidence"
+            ] if c in df.columns]
+
             st.dataframe(df[disp], use_container_width=True)
 
             st.markdown("---")
