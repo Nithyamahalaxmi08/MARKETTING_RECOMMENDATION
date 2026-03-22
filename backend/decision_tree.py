@@ -4,7 +4,7 @@ import time
 import joblib
 
 from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.metrics import (
     accuracy_score,
@@ -53,7 +53,7 @@ def top_2_accuracy(model, X_test, y_test):
 
 
 # -------------------------------
-# Evaluation Function
+# Evaluation Function (UPDATED)
 # -------------------------------
 def evaluate_model(model, X_train, X_test, y_train, y_test, le):
 
@@ -66,7 +66,7 @@ def evaluate_model(model, X_train, X_test, y_train, y_test, le):
     y_test_labels = le.inverse_transform(y_test)
     y_pred_labels = le.inverse_transform(y_pred)
 
-    # Basic Metrics
+    # Metrics
     accuracy = accuracy_score(y_test, y_pred)
     precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
     recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
@@ -107,20 +107,20 @@ def evaluate_model(model, X_train, X_test, y_train, y_test, le):
 
 
 # -------------------------------
-# Train Random Forest
+# Train Decision Tree
 # -------------------------------
-def train_random_forest(X, y, le):
+def train_decision_tree(X, y, le):
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42
     )
 
-    print("\n🚀 Training Random Forest...")
+    print("\n🌳 Training Decision Tree...")
 
     start_time = time.time()
 
-    model = RandomForestClassifier(
-        n_estimators=100,
+    model = DecisionTreeClassifier(
+        criterion='gini',   # or 'entropy'
         random_state=42,
         class_weight="balanced"
     )
@@ -130,7 +130,7 @@ def train_random_forest(X, y, le):
     training_time = time.time() - start_time
     print(f"⏱️ Training Time: {training_time:.4f} seconds")
 
-    # Evaluate model
+    # Evaluate
     evaluate_model(model, X_train, X_test, y_train, y_test, le)
 
     return model
@@ -151,14 +151,14 @@ def main():
     for i, label in enumerate(le.classes_):
         print(f"{i} → {label}")
 
-    model = train_random_forest(X, y, le)
+    model = train_decision_tree(X, y, le)
 
     # Save model and encoders
-    joblib.dump(model, "random_forest_model.pkl")
-    joblib.dump(encoder, "onehot_encoder.pkl")
-    joblib.dump(le, "label_encoder.pkl")
+    joblib.dump(model, "decision_tree_model.pkl")
+    joblib.dump(encoder, "onehot_encoder_dt.pkl")
+    joblib.dump(le, "label_encoder_dt.pkl")
 
-    print("\n💾 Model and encoders saved successfully!")
+    print("\n💾 Decision Tree model saved successfully!")
 
 
 if __name__ == "__main__":
